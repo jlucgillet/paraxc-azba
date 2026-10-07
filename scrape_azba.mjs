@@ -105,7 +105,19 @@ page.on('response', async (res) => {
     ]);
     const data = JSON.parse(text);
     const members = extractZones(data);
-    members.forEach((z) => zones.set(z['@id'] || z.id || `${z.codeId}-${z.name}`, z));
+    // Fusion par code OACI : la carte demande les zones deux fois (période en
+    // cours + réseau complet), avec des identifiants différents.
+    members.forEach((z) => {
+      const key = z.codeId || z.name || z['@id'];
+      const prev = zones.get(key);
+      if (!prev) { zones.set(key, z); return; }
+      const slots = [...(prev.timeSlots || [])];
+      for (const t of z.timeSlots || []) {
+        if (!slots.some((x) => x.startTime === t.startTime && x.endTime === t.endTime)) slots.push(t);
+      }
+      const base = (z.coordinates?.length || 0) > (prev.coordinates?.length || 0) ? z : prev;
+      zones.set(key, { ...base, timeSlots: slots });
+    });
     responses++;
     const msg = `${sec()}s 📥 ${members.length} zones lues (${shapeOf(data)}) — ${res.url().replace(/^https?:\/\/[^/]+/, '')}`;
     apiLog.push(msg);
