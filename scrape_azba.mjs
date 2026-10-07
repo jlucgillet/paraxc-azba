@@ -74,6 +74,26 @@ page.on('requestfailed', (req) => {
 });
 page.on('console', (msg) => { if (msg.type() === 'error') apiLog.push(`${sec()}s console: ${msg.text().slice(0, 200)}`); });
 
+// Extrait la liste des zones quelle que soit la forme de la réponse :
+// JSON-LD ({"hydra:member":[…]} ou {"member":[…]}), liste simple ([…]),
+// ou liste rangée sous une autre clé. Une zone = objet avec un contour.
+const isZone = (o) => o && typeof o === 'object' && Array.isArray(o.coordinates);
+function extractZones(data, depth = 0) {
+  if (Array.isArray(data)) return data.some(isZone) ? data.filter(isZone) : [];
+  if (!data || typeof data !== 'object' || depth > 3) return [];
+  for (const k of ['hydra:member', 'member', 'data', 'items', 'results']) {
+    const z = extractZones(data[k], depth + 1);
+    if (z.length) return z;
+  }
+  for (const v of Object.values(data)) {
+    const z = extractZones(v, depth + 1);
+    if (z.length) return z;
+  }
+  return [];
+}
+const shapeOf = (d) => Array.isArray(d) ? `liste de ${d.length} éléments` :
+  d && typeof d === 'object' ? `objet {${Object.keys(d).slice(0, 8).join(', ')}}` : typeof d;
+
 // Lecture des données reçues par la carte (zones RTBA + créneaux)
 page.on('response', async (res) => {
   if (!/\/api\/v\d+\/r_t_b_as(\?|$)/.test(res.url()) || !res.ok()) return;
@@ -85,10 +105,17 @@ page.on('response', async (res) => {
       new Promise((_, rej) => setTimeout(() => rej(new Error('contenu jamais reçu en entier (90 s)')), 90_000)),
     ]);
     const data = JSON.parse(text);
-    const members = data['hydra:member'] || data.member || [];
-    members.forEach((z) => zones.set(z['@id'] || `${z.codeId}-${z.name}`, z));
+    const members = extractZones(data);
+    members.forEach((z) => zones.set(z['@id'] || z.id || `${z.codeId}-${z.name}`, z));
     responses++;
-    console.log(`📥 ${members.length} zones reçues (${res.url().split('?')[0]})`);
+    const msg = `${sec()}s 📥 ${members.length} zones lues (${shapeOf(data)}) — ${res.url().replace(/^https?:\/\/[^/]+/, '')}`;
+    apiLog.push(msg);
+    console.log(msg);
+    if (!members.length) {
+      // Forme inconnue : on garde la réponse pour pouvoir adapter le script
+      mkdirSync('debug', { recursive: true });
+      writeFileSync(`debug/rtba_vide_${responses}.txt`, `URL : ${res.url()}\nForme : ${shapeOf(data)}\n\n${text.slice(0, 6000)}`);
+    }
   } catch (e) {
     // Contenu inattendu : on le garde pour le diagnostic
     const n = ++badBodies;
@@ -118,7 +145,7 @@ try {
     if (badBodies && Date.now() - t0 > 100_000) break;
     if (Date.now() - lastLog > 30_000) { lastLog = Date.now(); console.log(`⏳ ${sec()}s — en attente des zones RTBA…`); }
   }
-  if (responses) await page.waitForTimeout(3000);
+  if (responses) await page.waitForTimeout(5000);
 
   if (!zones.size) throw new Error(badBodies
     ? `les réponses RTBA du SIA ne sont pas des données lisibles (${badBodies} réponse(s) enregistrée(s) dans debug-sia)`
