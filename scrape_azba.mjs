@@ -28,6 +28,7 @@ if (!DRY_RUN && (!UPLOAD_URL || !UPLOAD_KEY)) {
 
 const zones = new Map();   // @id → zone (fusion si la carte fait plusieurs requêtes)
 let responses = 0;
+let badBodies = 0;   // réponses r_t_b_as au contenu inattendu
 
 // CHROMIUM_PATH (facultatif) : utiliser un Chromium déjà installé
 const browser = await chromium.launch({
@@ -66,14 +67,26 @@ page.on('console', (msg) => { if (msg.type() === 'error') apiLog.push(`${sec()}s
 // Lecture des données reçues par la carte (zones RTBA + créneaux)
 page.on('response', async (res) => {
   if (!/\/api\/v\d+\/r_t_b_as(\?|$)/.test(res.url()) || !res.ok()) return;
+  let text = '';
   try {
-    const data = await res.json();
+    text = await res.text();
+    const data = JSON.parse(text);
     const members = data['hydra:member'] || data.member || [];
     members.forEach((z) => zones.set(z['@id'] || `${z.codeId}-${z.name}`, z));
     responses++;
     console.log(`📥 ${members.length} zones reçues (${res.url().split('?')[0]})`);
   } catch (e) {
-    console.warn('Réponse illisible :', e.message);
+    // Contenu inattendu : on le garde pour le diagnostic
+    const n = ++badBodies;
+    apiLog.push(`${sec()}s réponse r_t_b_as illisible (${e.message}) → debug/rtba_reponse_${n}.txt`);
+    console.warn(`⚠ Réponse r_t_b_as illisible : ${e.message} (début : ${JSON.stringify(text.slice(0, 120))})`);
+    try {
+      mkdirSync('debug', { recursive: true });
+      writeFileSync(`debug/rtba_reponse_${n}.txt`,
+        `URL : ${res.url()}\nStatut : ${res.status()}\n\nEn-têtes :\n` +
+        Object.entries(await res.allHeaders()).map(([k, v]) => `${k}: ${v}`).join('\n') +
+        `\n\nLongueur du contenu : ${text.length}\n\nDébut du contenu :\n${text.slice(0, 4000)}`);
+    } catch {}
   }
 });
 
@@ -87,11 +100,15 @@ try {
   let lastLog = 0;
   while (!responses && Date.now() - t0 < WAIT_MS) {
     await page.waitForTimeout(500);
+    // Réponses reçues mais illisibles : inutile d'attendre les 3 minutes
+    if (badBodies && Date.now() - t0 > 30_000) break;
     if (Date.now() - lastLog > 30_000) { lastLog = Date.now(); console.log(`⏳ ${sec()}s — en attente des zones RTBA…`); }
   }
   if (responses) await page.waitForTimeout(3000);
 
-  if (!zones.size) throw new Error("la carte du SIA n'a renvoyé aucune zone RTBA");
+  if (!zones.size) throw new Error(badBodies
+    ? `les réponses RTBA du SIA ne sont pas des données lisibles (${badBodies} réponse(s) enregistrée(s) dans debug-sia)`
+    : "la carte du SIA n'a renvoyé aucune zone RTBA");
 
   const payload = {
     'hydra:member': [...zones.values()],
