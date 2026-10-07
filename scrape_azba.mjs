@@ -19,7 +19,7 @@ const PAGE_URL   = process.env.SIA_PAGE_URL || 'https://www.sia.aviation-civile.
 const UPLOAD_URL = process.env.PARAXC_UPLOAD_URL || '';
 const UPLOAD_KEY = process.env.PARAXC_UPLOAD_KEY || '';
 const DRY_RUN    = process.env.DRY_RUN === '1';
-const WAIT_MS    = 60_000; // délai maximal pour que la carte charge ses données
+const WAIT_MS    = 180_000; // délai maximal pour que la carte charge ses données (3 min)
 
 if (!DRY_RUN && (!UPLOAD_URL || !UPLOAD_KEY)) {
   console.error('❌ PARAXC_UPLOAD_URL et PARAXC_UPLOAD_KEY doivent être définis (secrets GitHub).');
@@ -30,13 +30,38 @@ const zones = new Map();   // @id → zone (fusion si la carte fait plusieurs re
 let responses = 0;
 
 // CHROMIUM_PATH (facultatif) : utiliser un Chromium déjà installé
-const browser = await chromium.launch({ executablePath: process.env.CHROMIUM_PATH || undefined });
+const browser = await chromium.launch({
+  executablePath: process.env.CHROMIUM_PATH || undefined,
+  args: ['--disable-blink-features=AutomationControlled'],
+});
+// Signature de navigateur ordinaire : sans fenêtre, Chromium se présente
+// sinon comme « HeadlessChrome », ce que certains sites refusent.
+const chromeVersion = browser.version().split('.')[0];
 const context = await browser.newContext({
+  userAgent: `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Safari/537.36`,
   locale: 'fr-FR',
   timezoneId: 'Europe/Paris',
   viewport: { width: 1280, height: 900 },
 });
 const page = await context.newPage();
+
+// Journal des échanges de la carte avec le SIA (pour le diagnostic)
+const apiLog = [];
+const t0 = Date.now();
+const sec = () => ((Date.now() - t0) / 1000).toFixed(1).padStart(5);
+page.on('response', (res) => {
+  const u = res.url();
+  if (!/sia-france\.fr|aviation-civile\.gouv\.fr\/(api|azbaEx\/api)/.test(u)) return;
+  const line = `${sec()}s ${res.status()} ${res.request().method()} ${u.split('?')[0].replace(/^https?:\/\/[^/]+/, '')}`;
+  apiLog.push(line);
+  console.log('   ' + line);
+});
+page.on('requestfailed', (req) => {
+  const line = `${sec()}s ÉCHEC ${req.method()} ${req.url().split('?')[0]} (${req.failure()?.errorText})`;
+  apiLog.push(line);
+  console.log('   ' + line);
+});
+page.on('console', (msg) => { if (msg.type() === 'error') apiLog.push(`${sec()}s console: ${msg.text().slice(0, 200)}`); });
 
 // Lecture des données reçues par la carte (zones RTBA + créneaux)
 page.on('response', async (res) => {
@@ -59,8 +84,11 @@ try {
 
   // Attendre que la carte ait reçu ses données, puis un court délai pour
   // laisser arriver d'éventuelles requêtes complémentaires.
-  const t0 = Date.now();
-  while (!responses && Date.now() - t0 < WAIT_MS) await page.waitForTimeout(500);
+  let lastLog = 0;
+  while (!responses && Date.now() - t0 < WAIT_MS) {
+    await page.waitForTimeout(500);
+    if (Date.now() - lastLog > 30_000) { lastLog = Date.now(); console.log(`⏳ ${sec()}s — en attente des zones RTBA…`); }
+  }
   if (responses) await page.waitForTimeout(3000);
 
   if (!zones.size) throw new Error("la carte du SIA n'a renvoyé aucune zone RTBA");
@@ -95,6 +123,7 @@ try {
     mkdirSync('debug', { recursive: true });
     await page.screenshot({ path: 'debug/page.png', fullPage: true });
     writeFileSync('debug/page.html', await page.content());
+    writeFileSync('debug/requetes.txt', apiLog.join('\n'));
   } catch {}
 } finally {
   await browser.close();
