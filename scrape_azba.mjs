@@ -57,6 +57,16 @@ page.on('response', (res) => {
   apiLog.push(line);
   console.log('   ' + line);
 });
+// Fin réelle de chaque téléchargement (le statut 200 arrive avant le contenu)
+page.on('requestfinished', async (req) => {
+  const u = req.url();
+  if (!/sia-france\.fr|aviation-civile\.gouv\.fr\/(api|azbaEx\/api)/.test(u)) return;
+  let size = '?';
+  try { size = (await req.sizes()).responseBodySize; } catch {}
+  const line = `${sec()}s TERMINÉ ${u.split('?')[0].replace(/^https?:\/\/[^/]+/, '')} (${size} octets)`;
+  apiLog.push(line);
+  console.log('   ' + line);
+});
 page.on('requestfailed', (req) => {
   const line = `${sec()}s ÉCHEC ${req.method()} ${req.url().split('?')[0]} (${req.failure()?.errorText})`;
   apiLog.push(line);
@@ -69,7 +79,11 @@ page.on('response', async (res) => {
   if (!/\/api\/v\d+\/r_t_b_as(\?|$)/.test(res.url()) || !res.ok()) return;
   let text = '';
   try {
-    text = await res.text();
+    // Délai maximal : si le contenu n'arrive jamais, on le note au lieu d'attendre indéfiniment
+    text = await Promise.race([
+      res.text(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('contenu jamais reçu en entier (90 s)')), 90_000)),
+    ]);
     const data = JSON.parse(text);
     const members = data['hydra:member'] || data.member || [];
     members.forEach((z) => zones.set(z['@id'] || `${z.codeId}-${z.name}`, z));
@@ -101,7 +115,7 @@ try {
   while (!responses && Date.now() - t0 < WAIT_MS) {
     await page.waitForTimeout(500);
     // Réponses reçues mais illisibles : inutile d'attendre les 3 minutes
-    if (badBodies && Date.now() - t0 > 30_000) break;
+    if (badBodies && Date.now() - t0 > 100_000) break;
     if (Date.now() - lastLog > 30_000) { lastLog = Date.now(); console.log(`⏳ ${sec()}s — en attente des zones RTBA…`); }
   }
   if (responses) await page.waitForTimeout(3000);
