@@ -16,8 +16,9 @@ import { chromium } from 'playwright';
 import { mkdirSync, writeFileSync } from 'node:fs';
 
 const PAGE_URL   = process.env.SIA_PAGE_URL || 'https://www.sia.aviation-civile.gouv.fr/azbaEx/?lang=fr';
-const UPLOAD_URL = process.env.PARAXC_UPLOAD_URL || '';
-const UPLOAD_KEY = process.env.PARAXC_UPLOAD_KEY || '';
+// Nettoyage des espaces, guillemets ou retours à la ligne collés par erreur dans le secret
+const UPLOAD_URL = (process.env.PARAXC_UPLOAD_URL || '').trim().replace(/^["']|["']$/g, '');
+const UPLOAD_KEY = (process.env.PARAXC_UPLOAD_KEY || '').trim();
 const DRY_RUN    = process.env.DRY_RUN === '1';
 const WAIT_MS    = 180_000; // délai maximal pour que la carte charge ses données (3 min)
 
@@ -163,12 +164,39 @@ try {
     writeFileSync('rtba.json', JSON.stringify(payload));
     console.log('💾 rtba.json écrit (DRY_RUN, rien envoyé)');
   } else {
-    const r = await fetch(UPLOAD_URL, {
+    let target;
+    try { target = new URL(UPLOAD_URL); }
+    catch { throw new Error(`PARAXC_UPLOAD_URL n'est pas une adresse valide (${UPLOAD_URL.length} caractères, commence par « ${UPLOAD_URL.slice(0, 12)} »)`); }
+    console.log(`📤 Envoi vers ${target.protocol}//${target.host}${target.pathname}${target.search}`);
+    const send = () => fetch(target, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-ParaXC-Key': UPLOAD_KEY },
+      headers: { 'Content-Type': 'application/json', 'X-ParaXC-Key': UPLOAD_KEY, 'User-Agent': 'ParaXC-AZBA/1.0 (GitHub Actions)' },
       body: JSON.stringify(payload),
       signal: AbortSignal.timeout(30_000),
     });
+    let r;
+    try {
+      try { r = await send(); }
+      catch { await new Promise((ok) => setTimeout(ok, 5000)); r = await send(); } // un nouvel essai
+    } catch (err) {
+      // « fetch failed » cache la vraie cause : on la détaille
+      const c = err.cause || {};
+      const code = c.code || c.name || '';
+      const hints = {
+        ENOTFOUND: 'nom de domaine introuvable : vérifiez l\'adresse dans le secret',
+        ECONNREFUSED: 'connexion refusée par le serveur',
+        ECONNRESET: 'connexion coupée par le serveur (pare-feu de l\'hébergeur ?)',
+        ETIMEDOUT: 'pas de réponse du serveur (pare-feu de l\'hébergeur ?)',
+        UND_ERR_CONNECT_TIMEOUT: 'pas de réponse du serveur (pare-feu de l\'hébergeur ?)',
+        UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'certificat HTTPS incomplet sur le serveur (chaîne intermédiaire manquante)',
+        CERT_HAS_EXPIRED: 'certificat HTTPS expiré',
+        ERR_TLS_CERT_ALTNAME_INVALID: 'certificat HTTPS ne correspondant pas au nom de domaine',
+        DEPTH_ZERO_SELF_SIGNED_CERT: 'certificat HTTPS auto-signé',
+        SELF_SIGNED_CERT_IN_CHAIN: 'certificat HTTPS auto-signé',
+      };
+      throw new Error(`impossible de joindre ${target.host} : ${code} ${c.message || err.message}` +
+        (hints[code] ? ` → ${hints[code]}` : ''));
+    }
     const txt = await r.text();
     if (!r.ok) throw new Error(`envoi au serveur ParaXC refusé : HTTP ${r.status} ${txt.slice(0, 300)}`);
     console.log(`📤 Envoyé au serveur ParaXC : ${txt.slice(0, 200)}`);
@@ -182,6 +210,7 @@ try {
     await page.screenshot({ path: 'debug/page.png', fullPage: true });
     writeFileSync('debug/page.html', await page.content());
     writeFileSync('debug/requetes.txt', apiLog.join('\n'));
+    writeFileSync('debug/erreur.txt', `${new Date().toISOString()}\n${e.message}\n`);
   } catch {}
 } finally {
   await browser.close();
