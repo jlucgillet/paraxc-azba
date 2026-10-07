@@ -9,20 +9,24 @@ on:
   # Bouton « Run workflow » pour lancer à la main (test)
   workflow_dispatch:
 
+# Nécessaire pour publier les données sur la branche « data »
+permissions:
+  contents: write
+
 concurrency:
   group: azba
   cancel-in-progress: false
 
 jobs:
   scrape:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04   # version figée : évite le passage automatique à Ubuntu 26
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - name: Installer les dépendances
@@ -43,11 +47,30 @@ jobs:
         if: steps.pw-cache.outputs.cache-hit == 'true'
         run: npx playwright install-deps chromium
 
-      - name: Récupérer les activations et les envoyer à ParaXC
+      - name: Récupérer les activations sur la carte du SIA
         env:
+          # Facultatif : envoi direct en plus de la publication (laisser vide si
+          # l'hébergeur bloque GitHub). Sans ces secrets, rien n'est envoyé.
           PARAXC_UPLOAD_URL: ${{ secrets.PARAXC_UPLOAD_URL }}
           PARAXC_UPLOAD_KEY: ${{ secrets.PARAXC_UPLOAD_KEY }}
         run: node scrape_azba.mjs
+
+      # Publication sur la branche « data » : un seul commit, remplacé à chaque
+      # lancement (le dépôt ne grossit pas). ParaXC_backend.php lit ensuite :
+      # https://raw.githubusercontent.com/<compte>/<dépôt>/data/rtba.json
+      - name: Publier les données (branche data)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /tmp/pub && cp rtba.json /tmp/pub/
+          cd /tmp/pub
+          git init -q -b data
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add rtba.json
+          git commit -q -m "Activations RTBA $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q -f "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
+          echo "📡 Données publiées : https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/data/rtba.json"
 
       - name: Capture d'écran en cas d'échec
         if: failure()
