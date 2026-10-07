@@ -1,0 +1,13 @@
+{
+  "name": "paraxc-azba",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Récupère les activations RTBA/AZBA affichées par la carte officielle du SIA et les envoie au serveur ParaXC.",
+  "type": "module",
+  "scripts": {
+    "start": "node scrape_azba.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.63.0"
+  }
+}
