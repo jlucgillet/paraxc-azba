@@ -3,14 +3,16 @@
 //
 // Ouvre la carte AZBA officielle du SIA dans un vrai navigateur (Chromium sans
 // fenêtre), exactement comme un visiteur. La carte télécharge elle-même ses
-// données (zones RTBA + créneaux d'activation) ; le script les lit au passage,
-// puis les envoie au serveur ParaXC (action rtba_upload de ParaXC_backend.php).
+// données (zones RTBA + créneaux d'activation) ; le script les lit au passage
+// et les écrit dans rtba.json. Le planning GitHub publie ensuite ce fichier sur
+// la branche « data » du dépôt, où ParaXC_backend.php vient le chercher.
 //
-// Variables d'environnement :
-//   PARAXC_UPLOAD_URL  ex. https://www.monsite.fr/ParaXC_backend.php?action=rtba_upload
-//   PARAXC_UPLOAD_KEY  clé secrète, identique à RTBA_UPLOAD_KEY dans ParaXC_backend.php
-//   SIA_PAGE_URL       (facultatif) page à ouvrir — par défaut la carte AZBA du SIA
-//   DRY_RUN=1          (facultatif) n'envoie rien, écrit seulement rtba.json
+// Variables d'environnement (toutes facultatives) :
+//   OUTPUT_FILE        fichier écrit (défaut : rtba.json)
+//   SIA_PAGE_URL       page à ouvrir — par défaut la carte AZBA du SIA
+//   PARAXC_UPLOAD_URL  + PARAXC_UPLOAD_KEY : envoi direct au serveur ParaXC
+//                      (?action=rtba_upload), en plus de la publication. Un échec
+//                      de cet envoi n'est qu'un avertissement.
 // ─────────────────────────────────────────────────────────────────────────────
 import { chromium } from 'playwright';
 import { mkdirSync, writeFileSync } from 'node:fs';
@@ -19,13 +21,9 @@ const PAGE_URL   = process.env.SIA_PAGE_URL || 'https://www.sia.aviation-civile.
 // Nettoyage des espaces, guillemets ou retours à la ligne collés par erreur dans le secret
 const UPLOAD_URL = (process.env.PARAXC_UPLOAD_URL || '').trim().replace(/^["']|["']$/g, '');
 const UPLOAD_KEY = (process.env.PARAXC_UPLOAD_KEY || '').trim();
-const DRY_RUN    = process.env.DRY_RUN === '1';
+const OUTPUT     = process.env.OUTPUT_FILE || 'rtba.json';
 const WAIT_MS    = 180_000; // délai maximal pour que la carte charge ses données (3 min)
 
-if (!DRY_RUN && (!UPLOAD_URL || !UPLOAD_KEY)) {
-  console.error('❌ PARAXC_UPLOAD_URL et PARAXC_UPLOAD_KEY doivent être définis (secrets GitHub).');
-  process.exit(1);
-}
 
 const zones = new Map();   // @id → zone (fusion si la carte fait plusieurs requêtes)
 let responses = 0;
@@ -160,10 +158,10 @@ try {
   const nSlots = payload['hydra:member'].reduce((n, z) => n + (z.timeSlots?.length || 0), 0);
   console.log(`✅ ${zones.size} zones, ${nSlots} créneaux d'activation`);
 
-  if (DRY_RUN) {
-    writeFileSync('rtba.json', JSON.stringify(payload));
-    console.log('💾 rtba.json écrit (DRY_RUN, rien envoyé)');
-  } else {
+  writeFileSync(OUTPUT, JSON.stringify(payload));
+  console.log(`💾 ${OUTPUT} écrit`);
+
+  if (UPLOAD_URL && UPLOAD_KEY) try {
     let target;
     try { target = new URL(UPLOAD_URL); }
     catch { throw new Error(`PARAXC_UPLOAD_URL n'est pas une adresse valide (${UPLOAD_URL.length} caractères, commence par « ${UPLOAD_URL.slice(0, 12)} »)`); }
@@ -200,6 +198,9 @@ try {
     const txt = await r.text();
     if (!r.ok) throw new Error(`envoi au serveur ParaXC refusé : HTTP ${r.status} ${txt.slice(0, 300)}`);
     console.log(`📤 Envoyé au serveur ParaXC : ${txt.slice(0, 200)}`);
+  } catch (err) {
+    // La publication sur GitHub reste la voie principale : simple avertissement
+    console.warn(`⚠ Envoi direct non abouti (sans conséquence, le serveur lit la branche data) : ${err.message}`);
   }
 } catch (e) {
   console.error('❌ Échec :', e.message);
