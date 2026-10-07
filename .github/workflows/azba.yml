@@ -1,0 +1,59 @@
+name: Activations RTBA (SIA) → ParaXC
+
+on:
+  # Toutes les 30 min de 05h07 à 19h37 UTC
+  # (soit ~7h–21h30 en heure d'été, ~6h–20h30 en heure d'hiver).
+  # GitHub peut décaler les lancements programmés de quelques minutes.
+  schedule:
+    - cron: '7,37 5-19 * * *'
+  # Bouton « Run workflow » pour lancer à la main (test)
+  workflow_dispatch:
+
+concurrency:
+  group: azba
+  cancel-in-progress: false
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Installer les dépendances
+        run: npm ci
+
+      - name: Cache du navigateur Chromium
+        id: pw-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: pw-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Installer Chromium
+        if: steps.pw-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Dépendances système de Chromium
+        if: steps.pw-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      - name: Récupérer les activations et les envoyer à ParaXC
+        env:
+          PARAXC_UPLOAD_URL: ${{ secrets.PARAXC_UPLOAD_URL }}
+          PARAXC_UPLOAD_KEY: ${{ secrets.PARAXC_UPLOAD_KEY }}
+        run: node scrape_azba.mjs
+
+      - name: Capture d'écran en cas d'échec
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: debug-sia
+          path: debug/
+          retention-days: 5
+          if-no-files-found: ignore
